@@ -12,15 +12,49 @@ use ratatui::{
 };
 use std::{
     env, fs,
-    io::{self, stdout},
+    io::{self, stdout, Read},
     path::PathBuf,
+    time,
 };
+use open;
+use chrono::DateTime;
 
 // === MODELS ===
 #[derive(Debug)]
 pub struct DirItem {
     pub name: String,
     pub is_dir: bool,
+    pub file_size: u64,
+    pub modified: Option<time::SystemTime>,
+}
+
+impl DirItem {
+    pub fn format_size(&self) -> String {
+        if self.is_dir {
+            return String::from("DIR");
+        }
+        
+        if self.file_size < 1024 {
+            format!("{} bytes", self.file_size)
+        } else if self.file_size < 1024 * 1024 {
+            format!("{} kb", self.file_size / 1024)
+        } else if self.file_size < 1024 * 1024 * 1024 {
+            format!("{:.1} mb", self.file_size as f64 / (1024.0 * 1024.0))
+        } else {
+            format!("{:.2} gb", self.file_size as f64 / (1024.0 * 1024.0 * 1024.0))
+        }
+    }
+    pub fn format_modified(&self) -> String {
+        match self.modified {
+            Some(sys_time) => {
+                // Convert standard SystemTime into a Chrono Local time
+                let datetime: DateTime<chrono::Local> = sys_time.into();
+                // Format it nicely as YYYY-MM-DD HH:MM
+                datetime.format("%Y-%m-%d %H:%M").to_string()
+            }
+            _ => String::from("Undefined"),
+        }
+    }
 }
 
 #[derive(PartialEq)]
@@ -38,6 +72,8 @@ pub struct App {
     pub mode: AppMode,
     pub clipboard: Option<std::path::PathBuf>,
     pub rename_buffer: String,
+    pub should_force_redraw: bool,
+    pub show_hidden: bool,
 }
 
 impl App {
@@ -51,7 +87,9 @@ impl App {
             items: Vec::new(),
             cursor_position: 0,
             clipboard: None,
-            rename_buffer: String::new()
+            rename_buffer: String::new(),
+            should_force_redraw: false,
+            show_hidden: false,
         }
     }
 
@@ -67,11 +105,28 @@ impl App {
             if let Ok(file) = entry {
                 let path = file.path();
                 let name = file.file_name().to_string_lossy().into_owned();
-                let is_dir = path.is_dir();
-                self.items.push(DirItem { name, is_dir });
+                if !self.show_hidden && name.starts_with('.') {
+                    continue 
+                } else {
+
+                    let is_dir = path.is_dir();
+                    let (file_size, modified) = if let Ok(metadata) = file.metadata() {
+                        (metadata.len(), metadata.modified().ok())
+                    } else {
+                        (0, None)
+                    };
+                    self.items.push(DirItem {name, is_dir, file_size, modified});
+                }
             }
         }
         self.items.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+        
+        if self.cursor_position >= self.items.len() && !self.items.is_empty() {
+            self.cursor_position = self.items.len() - 1;
+        } else if self.items.is_empty() {
+            self.cursor_position = 0;
+        }
+
     }
 
     // === NAVIGATION LOGIC ===
@@ -94,12 +149,21 @@ impl App {
         if self.items.is_empty() {
             return;
         }
-        let selected_item = &self.items[self.cursor_position];
+        let selected_item: &DirItem = &self.items[self.cursor_position];
+
         if selected_item.is_dir {
             self.current_path.push(&selected_item.name);
             self.populate_files();
+        } else {
+            if let Some(path) = self.get_selected_path() {
+                if is_text_file(&path) {
+                    self.open_in_editor();
+                } else {
+                    let _ = open::that(path);
+                }
+            }
         }
-    }
+    }    
 
     pub fn go_up(&mut self) {
         if self.current_path.pop() {
@@ -169,11 +233,38 @@ impl App {
         self.mode = AppMode::Normal
     }
 
+    pub fn open_in_editor(&mut self) {
+        if let Some(path) = self.get_selected_path() {
+            if path.is_file() {
+                let _ = (stdout(), LeaveAlternateScreen);
+                let _ = disable_raw_mode();
+
+                let mut child = std::process::Command::new("nvim").arg(&path)
+                    .spawn().expect("Failed to launch nvim");
+
+                let _ = child.wait();
+
+                let _ = enable_raw_mode();
+                let _ = execute!(stdout(), EnterAlternateScreen);
+
+                self.should_force_redraw = true;
+            }
+        }
+    }
+
+
     // === UI & RENDERING ===
     pub fn ui(&self, frame: &mut Frame) {
         let ui_items: Vec<ListItem> = self.items.iter().map(|item| {
             let prefix = if item.is_dir { "📁 " } else { "📄 " };
-            ListItem::new(format!("{}{}", prefix, item.name))
+            ListItem::new(format!(
+                "{}{} {:<50} {:>30}   {}", 
+                prefix, 
+                "", 
+                item.name, 
+                item.format_size(), 
+                item.format_modified()
+            ))
         }).collect();
 
         let list = List::new(ui_items)
@@ -225,6 +316,12 @@ impl App {
         let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout()))?;
 
         loop {
+
+            if self.should_force_redraw {
+                terminal.clear()?;
+                self.should_force_redraw = false;
+            }
+
             terminal.draw(|f| self.ui(f))?;
 
             if let Event::Key(key) = event::read()? {
@@ -239,6 +336,10 @@ impl App {
                             if self.get_selected_name().is_some() {
                                 self.mode = AppMode::ConfirmDelete;
                             }
+                        },
+                        KeyCode::Char('-') => {
+                            self.show_hidden = if self.show_hidden {false} else {true};
+                            self.populate_files();
                         },
                         KeyCode::Char('r') => { // Added the trigger for renaming!
                             if let Some(name) = self.get_selected_name() {
@@ -283,7 +384,7 @@ impl App {
 // === UTILITIES ===
 fn centered_rect(percent_x: u16, fixed_y: u16, r: Rect) -> Rect {
     // Slice vertically using Min(0) to center it, but strictly enforce the fixed_y height
-    let vertical_split = Layout::default()
+    let vertical_split = Layout::default() // Added Read heredefault()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),          // Top margin
@@ -303,6 +404,20 @@ fn centered_rect(percent_x: u16, fixed_y: u16, r: Rect) -> Rect {
         .split(vertical_split[1]);
 
     horizontal_split[1]
+}
+
+fn is_text_file(path: &std::path::Path) -> bool {
+    if let Ok(mut file) = std::fs::File::open(path) {
+    let mut buffer = [0u8; 512];
+    
+    if let Ok(bytes_read) = file.read(&mut buffer) {
+            if bytes_read == 0 {
+                return true;
+            }
+            
+            return !buffer.iter().take(bytes_read).any(|&byte| byte == 0);        }
+    }
+    false
 }
 
 // === MAIN ===

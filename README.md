@@ -7,6 +7,8 @@ TUI based project i made because i was learning Rust and wanted to challenge mys
 
 <h1> Things!!! </h1> 
 
+-> File descriptions (new) <br>
+-> Open in default app (also new) <br>
 -> delete (d) <br>
 -> rename (r) <br>
 -> copy (c) <br>
@@ -16,8 +18,6 @@ TUI based project i made because i was learning Rust and wanted to challenge mys
 <br>
 <h1> Things!!!!! it will do </h1>
 <br>
- -> File descriptions <br>
- -> Open in default app <br>
  -> SwagCat symbolism <br>
  -> Graphical SwagCat Interface <br>
  -> Whatever i feel like it should do <br>
