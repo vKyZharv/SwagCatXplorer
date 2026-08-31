@@ -5,12 +5,13 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState},
     Frame,
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    text::self,
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    style::{Modifier,Style,Color}
 };
-use std::{
+    use std::{
     env, fs,
     io::{self, stdout, Read},
     path::PathBuf,
@@ -18,6 +19,26 @@ use std::{
 };
 use open;
 use chrono::DateTime;
+
+pub struct KeyBinding {
+    pub key : &'static str,
+    pub description : &'static str, 
+}
+
+const HELP_ITEMS: &[KeyBinding; 10] = &[
+    KeyBinding { key: "↑/↓", description: "Navigate" },
+    KeyBinding { key: "Enter", description: "Open/Dir" },
+    KeyBinding { key: "Backspace", description: "Back" },
+    KeyBinding { key: "n", description: "New" },
+    KeyBinding { key: "r", description: "Rename" },
+    KeyBinding { key: "d", description: "Delete" },
+    KeyBinding { key: "c", description: "Copy" },
+    KeyBinding { key: "v", description: "Paste" },
+    KeyBinding { key: "-", description: "Hidden" },
+    KeyBinding { key: "q", description: "Quit" },
+];
+
+
 
 // === MODELS ===
 #[derive(Debug)]
@@ -62,6 +83,7 @@ pub enum AppMode {
     Normal,
     ConfirmDelete,
     Renaming,
+    Create,
 }
 
 // === APP STATE ===
@@ -74,6 +96,7 @@ pub struct App {
     pub rename_buffer: String,
     pub should_force_redraw: bool,
     pub show_hidden: bool,
+    pub create_buffer: String,
 }
 
 impl App {
@@ -90,7 +113,36 @@ impl App {
             rename_buffer: String::new(),
             should_force_redraw: false,
             show_hidden: false,
+            create_buffer: String::new(),
         }
+    }
+
+    pub fn render_footer(&self, frame:&mut Frame, area:Rect) {
+        let mut help_spans = Vec::new();
+
+        for (i, item) in HELP_ITEMS.iter().enumerate() {
+            help_spans.push(text::Span::styled(
+                    item.key,
+                    Style::default().fg(Color::Yellow)
+                    ));
+
+            help_spans.push(ratatui::text::Span::raw(format!("-> {}", item.description)));
+
+            if i < HELP_ITEMS.len() - 1 {
+                help_spans.push(text::Span::styled(
+                        "   > ", 
+                        Style::default().fg(Color::DarkGray)
+               ));
+            }    
+        }
+
+            let help_paragraph = Paragraph::new(text::Line::from(help_spans)).block(
+                Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray))
+                ).alignment(Alignment::Center);
+
+            frame.render_widget(help_paragraph, area);
     }
 
     pub fn populate_files(&mut self) {
@@ -221,6 +273,31 @@ impl App {
             }
         }
     }
+        pub fn create(&mut self) {
+            if self.create_buffer.is_empty() {
+                self.mode = AppMode::Normal;
+                return;
+            }
+
+            let target_path = self.current_path.join(&self.create_buffer);
+
+            if self.rename_buffer.ends_with('/') {
+                let _ = std::fs::create_dir_all(&target_path);
+            } else {
+                let _ = std::fs::File::create(&target_path);
+            }
+
+            self.mode = AppMode::Normal;
+            self.populate_files();
+
+            let search_name = self.create_buffer.trim_end_matches('/');
+            if let Some(pos) = self.items.iter()
+                .position(| i| i.name == search_name){
+                self.cursor_position = pos;
+            }
+            self.create_buffer.clear();
+        }
+    
     pub fn rename_item(&mut self) {
         if let Some(old_path) = self.get_selected_path() {
             if !self.rename_buffer.is_empty() {
@@ -255,6 +332,14 @@ impl App {
 
     // === UI & RENDERING ===
     pub fn ui(&self, frame: &mut Frame) {
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Min(0), 
+                ratatui::layout::Constraint::Length(3),
+            ])
+            .split(frame.area());
+
         let ui_items: Vec<ListItem> = self.items.iter().map(|item| {
             let prefix = if item.is_dir { "📁 " } else { "📄 " };
             ListItem::new(format!(
@@ -278,45 +363,69 @@ impl App {
 
         let mut list_state = ListState::default();
         list_state.select(Some(self.cursor_position));
+        
+        frame.render_stateful_widget(list, chunks[0], &mut list_state);
 
-        frame.render_stateful_widget(list, frame.area(), &mut list_state);
+        self.render_footer(frame, chunks[1]);
 
         if let AppMode::ConfirmDelete = self.mode {
             let target_name = self.get_selected_name().unwrap_or_else(|| String::from("this item"));
-            let popup_area = centered_rect(60, 20, frame.area());
+            let popup_area = centered_rect(10, 3, frame.area());
 
-            frame.render_widget(Clear, popup_area);
+            frame.render_widget(ratatui::widgets::Clear, popup_area);
 
-            let warning_box = Block::default()
-                .title(format!(" Delete {} (Y/N)? ", target_name))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red))
-                .style(Style::default().fg(Color::Red));
+            let warning_box = Paragraph::new(target_name.clone())
+                .block(
+                    Block::default()
+                        .title(format!(" Delete {} (Y/N)? ", target_name))
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Red))
+                )
+                .style(Style::default().fg(Color::White));
 
             frame.render_widget(warning_box, popup_area);
-        }
-
+        } 
+        
         if let AppMode::Renaming = self.mode {
             let popup_area = centered_rect(60, 3, frame.area());
-            frame.render_widget(Clear, popup_area);
-        
-            let input_box = ratatui::widgets::Paragraph::new(self.rename_buffer.as_str()).block(
+            frame.render_widget(ratatui::widgets::Clear, popup_area);
+            
+            let input_box = Paragraph::new(self.rename_buffer.as_str()).block(
                 Block::default().title("Rename").borders(Borders::ALL).border_style(Style::default().
                     fg(Color::Yellow)
                 ));
             frame.render_widget(input_box, popup_area);
+
+            #[allow(clippy::cast_possible_truncation)]
+            frame.set_cursor_position((popup_area.x + 1 + self.rename_buffer.chars().count() as u16, popup_area.y + 1));
+        }
+
+        if let AppMode::Create = self.mode {
+            let popup_area = centered_rect(50, 3, frame.area()); 
+            frame.render_widget(ratatui::widgets::Clear, popup_area); 
+
+            let input_area = Paragraph::new(self.create_buffer.clone())
+                .block(
+                    Block::default()
+                    .title("Create File/Folder?")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Green))
+                ).style(Style::default().fg(Color::White));
+
+            frame.render_widget(input_area, popup_area);
+            
+            #[allow(clippy::cast_possible_truncation)]
+            frame.set_cursor_position((popup_area.x + 1 + self.create_buffer.chars().count() as u16, popup_area.y + 1));
         }
     }
-
     // === EVENT LOOP ===
-    pub fn run(&mut self) -> io::Result<()> {
+        pub fn run(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
         execute!(stdout(), EnterAlternateScreen)?;
 
         let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout()))?;
 
         loop {
-
             if self.should_force_redraw {
                 terminal.clear()?;
                 self.should_force_redraw = false;
@@ -338,10 +447,10 @@ impl App {
                             }
                         },
                         KeyCode::Char('-') => {
-                            self.show_hidden = if self.show_hidden {false} else {true};
+                            self.show_hidden = if self.show_hidden { false } else { true };
                             self.populate_files();
                         },
-                        KeyCode::Char('r') => { // Added the trigger for renaming!
+                        KeyCode::Char('r') => { 
                             if let Some(name) = self.get_selected_name() {
                                 self.rename_buffer = name;
                                 self.mode = AppMode::Renaming;
@@ -349,6 +458,10 @@ impl App {
                         },
                         KeyCode::Char('c') => self.copy_item(),
                         KeyCode::Char('v') => self.paste_item(),
+                        KeyCode::Char('n') => { // FIXED: Capital 'C' in Char
+                            self.mode = AppMode::Create;
+                            self.create_buffer.clear();
+                        },
                         _ => {}
                     },
                     AppMode::ConfirmDelete => match key.code {
@@ -361,16 +474,49 @@ impl App {
                         }
                         _ => {}
                     },
-                    AppMode::Renaming => match key.code{
+                    AppMode::Renaming => match key.code {
                         KeyCode::Char(c) => self.rename_buffer.push(c),
-                        KeyCode::Backspace => {self.rename_buffer.pop();},
+                        KeyCode::Backspace => { self.rename_buffer.pop(); },
                         KeyCode::Enter => self.rename_item(),
                         KeyCode::Esc => {
                             self.rename_buffer.clear();
                             self.mode = AppMode::Normal;
-                        }
-                    _ => {}
-                    }
+                        },
+                        _ => {} // FIXED: Added catch-all to satisfy the compiler
+                    },
+                    AppMode::Create => match key.code {
+                        KeyCode::Esc => {
+                            self.mode = AppMode::Normal;      
+                        },
+                        KeyCode::Char(c) => {
+                            self.create_buffer.push(c); // FIXED: Added .push()
+                        },
+                        KeyCode::Backspace => {
+                            self.create_buffer.pop();
+                        },
+                        KeyCode::Enter => {
+                            if !self.create_buffer.is_empty() {
+                                let target_path = self.current_path.join(&self.create_buffer);
+                                
+                                // The Magic: '/' means folder, anything else means file
+                                if self.create_buffer.ends_with('/') {
+                                    let _ = std::fs::create_dir_all(&target_path);
+                                } else {
+                                    let _ = std::fs::File::create(&target_path);
+                                }
+
+                                self.mode = AppMode::Normal;
+                                self.populate_files();
+
+                                // Optional but awesome: automatically move the cursor to the new item!
+                                let search_name = self.create_buffer.trim_end_matches('/');
+                                if let Some(pos) = self.items.iter().position(|i| i.name == search_name) {
+                                    self.cursor_position = pos;
+                                }    
+                            } // FIXED: Added missing closing brace for the `if` statement
+                        },
+                        _ => {}
+                    },
                 }
             }
         }
@@ -378,8 +524,9 @@ impl App {
         disable_raw_mode()?;
 
         Ok(())
-    }
+        }
 }
+
 
 // === UTILITIES ===
 fn centered_rect(percent_x: u16, fixed_y: u16, r: Rect) -> Rect {
@@ -419,7 +566,6 @@ fn is_text_file(path: &std::path::Path) -> bool {
     }
     false
 }
-
 // === MAIN ===
 fn main() -> io::Result<()> {
     let mut app = App::new();
