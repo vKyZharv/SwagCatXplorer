@@ -111,6 +111,7 @@ pub struct App {
     pub notification: Option<String>,
     pub sort_method: SortMethod,
     pub reverse: bool,
+    pub preview: Option<String>,
 }
 
 impl App {
@@ -133,6 +134,7 @@ impl App {
             notification: None,
             sort_method: SortMethod::Name,
             reverse: false,
+            preview: None,
         }
     }
 
@@ -212,6 +214,7 @@ impl App {
             }
         }
         self.sort_files();
+        self.fn_preview();
         
         if self.cursor_position >= self.items.len() && !self.items.is_empty() {
             self.cursor_position = self.items.len() - 1;
@@ -225,6 +228,7 @@ impl App {
     pub fn cursor_up(&mut self) {
         if self.cursor_position > 0 {
             self.cursor_position -= 1;
+            self.fn_preview();
         }
     }
 
@@ -234,6 +238,7 @@ impl App {
         }
         if self.cursor_position < self.items.len() - 1 {
             self.cursor_position += 1;
+            self.fn_preview();
         }
     }
 
@@ -290,6 +295,22 @@ impl App {
         });
     }
 
+    pub fn render_preview(&self, frame: &mut Frame, area:Rect) {
+        let preview_content = self.preview.as_deref().unwrap_or("");
+        
+        let preview_box = Paragraph::new(preview_content)
+            .block(
+                Block::default()
+                    .title(" Preview ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+            )
+            // Using the full path here just in case Wrap isn't in your top imports
+            .wrap(ratatui::widgets::Wrap { trim: false });
+
+        frame.render_widget(preview_box, area);
+    }
+
     pub fn cycle_sort(&mut self) {
         self.sort_method = match self.sort_method {
             SortMethod::Name => SortMethod::Size,
@@ -342,6 +363,23 @@ impl App {
         frame.render_widget(log_list, popup_area);
     }
     
+    pub fn fn_preview(&mut self) {
+        if let Some(path) = self.get_selected_path() {
+            if path.is_dir() {
+                self.preview = None;
+            } else if is_text_file(&path) {
+                if let Ok(mut file) = std::fs::File::open(&path) {
+                    let mut buffer = vec![0u8; 2048];
+                    if let Ok(bytes) = file.read(&mut buffer) {
+                        self.preview = Some(String::from_utf8_lossy(&buffer[0..bytes]).into_owned());}
+                }
+            } else {
+                self.preview = Some(String::from("-- Binary or Non-Text File --"));
+            }
+        } else {
+            self.preview = None;
+        }
+    }
     
 
     pub fn delete_item(&mut self) {
@@ -490,8 +528,17 @@ impl App {
 
         let mut list_state = ListState::default();
         list_state.select(Some(self.cursor_position));
+
+        let main_columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
+            ])
+            .split(chunks[0]);
         
-        frame.render_stateful_widget(list, chunks[0], &mut list_state);
+        frame.render_stateful_widget(list, main_columns[0], &mut list_state);
+        self.render_preview(frame, main_columns[1]);
 
         self.render_footer(frame, chunks[1]);
 
