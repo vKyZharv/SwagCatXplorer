@@ -1,11 +1,14 @@
 // === IMPORTS ===
+use std::cmp::Ordering;
+
 use crossterm::{
     event::{self, Event::self , KeyCode}, execute, terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
-    Frame, layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style}, 
-    text::self, 
+    Frame,
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::self,
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph}
 };
     use std::{
@@ -14,7 +17,6 @@ use ratatui::{
     path::PathBuf,
     time,
 };
-use open;
 use chrono::{DateTime};
 
 
@@ -23,7 +25,7 @@ pub struct KeyBinding {
     pub description : &'static str,
 }
 
-const HELP_ITEMS: &[KeyBinding; 12] = &[
+const HELP_ITEMS: &[KeyBinding; 13] = &[
     KeyBinding { key: "↑/↓", description: "Navigate" },
     KeyBinding { key: "Enter", description: "Open/Dir" },
     KeyBinding { key: "Backspace", description: "Back" },
@@ -36,6 +38,7 @@ const HELP_ITEMS: &[KeyBinding; 12] = &[
     KeyBinding { key: "q", description: "Quit" },
     KeyBinding { key: "/", description: "Search"},
     KeyBinding { key: "h", description: "History"},
+    KeyBinding { key: "s", description: "SortMethod"}
 ];
 
 
@@ -77,6 +80,12 @@ impl DirItem {
         }
     }
 }
+#[derive(Debug, PartialEq)]
+pub enum SortMethod {
+    Name,
+    Size,
+    DateModified,
+}
 
 #[derive(PartialEq)]
 pub enum AppMode {
@@ -102,6 +111,8 @@ pub struct App {
     pub search_buffer:String,
     pub status_message: Vec<String>,
     pub notification: Option<String>,
+    pub sort_method: SortMethod,
+    pub reverse: bool,
 }
 
 impl App {
@@ -122,33 +133,43 @@ impl App {
             search_buffer: String::new(),
             status_message: Vec::new(),
             notification: None,
+            sort_method: SortMethod::Name,
+            reverse: false,
         }
     }
 
     pub fn render_footer(&self, frame:&mut Frame, area:Rect) {
-        let mut help_spans = Vec::new();
+        let mid = HELP_ITEMS.len() / 2;
+        let (top_row, bottom_row) = HELP_ITEMS.split_at(mid);
 
-        for (i, item) in HELP_ITEMS.iter().enumerate() {
-            help_spans.push(text::Span::styled(
+        let mut lines = Vec::new();
+
+        for row_items in [top_row, bottom_row] {
+            let mut spans = Vec::new();
+            
+            for (i, item) in row_items.iter().enumerate() {
+                spans.push(text::Span::styled(
                     item.key,
                     Style::default().fg(Color::Yellow)
-                    ));
+                ));
 
-            help_spans.push(ratatui::text::Span::raw(format!("-> {}", item.description)));
+            spans.push(ratatui::text::Span::raw(format!("-> {}", item.description)));
 
             if i < HELP_ITEMS.len() - 1 {
-                help_spans.push(text::Span::styled(
+                spans.push(text::Span::styled(
                         "   > ", 
                         Style::default().fg(Color::DarkGray)
                ));
             }    
         }
-
-            let help_paragraph = Paragraph::new(text::Line::from(help_spans)).block(
+            lines.push(text::Line::from(spans));
+        }
+            let help_paragraph = Paragraph::new(lines)
+                .block(
                 Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray))
-                ).alignment(Alignment::Center);
+            ).alignment(Alignment::Center);
 
             frame.render_widget(help_paragraph, area);
     }
@@ -192,7 +213,7 @@ impl App {
                 }
             }
         }
-        self.items.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+        self.sort_files();
         
         if self.cursor_position >= self.items.len() && !self.items.is_empty() {
             self.cursor_position = self.items.len() - 1;
@@ -252,6 +273,34 @@ impl App {
             return None; 
         }
         Some(self.items[self.cursor_position].name.clone())
+    }
+    
+    pub fn sort_files(&mut self){
+        self.items.sort_by(|a,b| {
+        if a.is_dir && b.is_dir { return Ordering::Less;}
+        if !a.is_dir && b.is_dir {return Ordering::Greater;}
+
+        let mut ordering = match self.sort_method {
+            SortMethod::Name => a.name.to_lowercase()
+                .cmp(&b.name.to_lowercase()),
+            SortMethod::Size => a.file_size.cmp(&b.file_size),
+            SortMethod::DateModified => a.modified.cmp(&b.modified),
+        };
+        if self.reverse {
+            ordering = ordering.reverse();
+        }
+        ordering
+        });
+    }
+
+    pub fn cycle_sort(&mut self) {
+        self.sort_method = match self.sort_method {
+            SortMethod::Name => SortMethod::Size,
+            SortMethod::Size => SortMethod::DateModified,
+            SortMethod::DateModified => SortMethod::Name,
+        };
+        self.sort_files();
+        self.log_action(format!("Sorted by {:?}", self.sort_method));
     }
 
     pub fn get_selected_path(&self) -> Option<std::path::PathBuf> {
@@ -409,11 +458,11 @@ impl App {
 
     // === UI & RENDERING ===
     pub fn ui(&self, frame: &mut Frame) {
-        let chunks = ratatui::layout::Layout::default()
-            .direction(ratatui::layout::Direction::Vertical)
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
             .constraints([
-                ratatui::layout::Constraint::Min(0), 
-                ratatui::layout::Constraint::Length(3),
+                Constraint::Min(0), 
+                Constraint::Length(4),
             ])
             .split(frame.area());
 
@@ -561,6 +610,7 @@ impl App {
                         KeyCode::Down => self.cursor_down(),
                         KeyCode::Enter => self.enter_selected(),
                         KeyCode::Backspace => self.go_up(),
+                        KeyCode::Char('s') => self.cycle_sort(),
                         KeyCode::Char('d') => {
                             if self.get_selected_name().is_some() {
                                 self.mode = AppMode::ConfirmDelete;
