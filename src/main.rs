@@ -1,15 +1,9 @@
 // === IMPORTS ===
 use crossterm::{
-    event::{self, Event, KeyCode},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{self, Event::self , KeyCode}, execute, terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
-    Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    text::self,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-    style::{Modifier,Style,Color}
+    Frame, layout::{Alignment, Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style}, text::self, widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph}
 };
     use std::{
     env, fs,
@@ -25,7 +19,7 @@ pub struct KeyBinding {
     pub description : &'static str, 
 }
 
-const HELP_ITEMS: &[KeyBinding; 10] = &[
+const HELP_ITEMS: &[KeyBinding; 11] = &[
     KeyBinding { key: "↑/↓", description: "Navigate" },
     KeyBinding { key: "Enter", description: "Open/Dir" },
     KeyBinding { key: "Backspace", description: "Back" },
@@ -36,6 +30,7 @@ const HELP_ITEMS: &[KeyBinding; 10] = &[
     KeyBinding { key: "v", description: "Paste" },
     KeyBinding { key: "-", description: "Hidden" },
     KeyBinding { key: "q", description: "Quit" },
+    KeyBinding { key: "/", description: "Search"},
 ];
 
 
@@ -84,6 +79,7 @@ pub enum AppMode {
     ConfirmDelete,
     Renaming,
     Create,
+    Search,
 }
 
 // === APP STATE ===
@@ -97,6 +93,7 @@ pub struct App {
     pub should_force_redraw: bool,
     pub show_hidden: bool,
     pub create_buffer: String,
+    pub search_buffer:String,
 }
 
 impl App {
@@ -114,6 +111,7 @@ impl App {
             should_force_redraw: false,
             show_hidden: false,
             create_buffer: String::new(),
+            search_buffer: String::new(),
         }
     }
 
@@ -148,25 +146,38 @@ impl App {
     pub fn populate_files(&mut self) {
         self.items.clear();
         self.cursor_position = 0;
-
-        let entries = match fs::read_dir(&self.current_path) {
+        
+        if !self.search_buffer.is_empty() {
+            populate_search_results(
+                &self.current_path,
+                &self.search_buffer,
+                self.show_hidden,
+                &mut self.items
+                );
+        } else {
+                let entries = match fs::read_dir(&self.current_path) {
             Ok(iterator) => iterator,
             Err(_) => return,
         };
+    
         for entry in entries {
             if let Ok(file) = entry {
                 let path = file.path();
                 let name = file.file_name().to_string_lossy().into_owned();
                 if !self.show_hidden && name.starts_with('.') {
                     continue 
-                } else {
-
-                    let is_dir = path.is_dir();
-                    let (file_size, modified) = if let Ok(metadata) = file.metadata() {
+                }
+                if !self.search_buffer.is_empty() {
+                        if !name.to_lowercase().contains(&self.search_buffer.to_lowercase()) {
+                            continue;
+                        }
+                }
+                let is_dir = path.is_dir();
+                let (file_size, modified) = if let Ok(metadata) = file.metadata() {
                         (metadata.len(), metadata.modified().ok())
-                    } else {
+                } else {
                         (0, None)
-                    };
+                };
                     self.items.push(DirItem {name, is_dir, file_size, modified});
                 }
             }
@@ -205,6 +216,7 @@ impl App {
 
         if selected_item.is_dir {
             self.current_path.push(&selected_item.name);
+            self.search_buffer.clear();
             self.populate_files();
         } else {
             if let Some(path) = self.get_selected_path() {
@@ -219,6 +231,7 @@ impl App {
 
     pub fn go_up(&mut self) {
         if self.current_path.pop() {
+            self.search_buffer.clear();
             self.populate_files();
         }
     }
@@ -356,8 +369,12 @@ impl App {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!(" {} ", self.current_path.display()))
-            )
+                    .title(if self.search_buffer.is_empty() {
+                        format!(" {} ", self.current_path.display())
+                    } else {
+                        format!("{} | Filter: {}", self.current_path.display(), self.search_buffer)
+                    }
+            ))
             .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
             .highlight_symbol(">> ");
 
@@ -417,7 +434,25 @@ impl App {
             #[allow(clippy::cast_possible_truncation)]
             frame.set_cursor_position((popup_area.x + 1 + self.create_buffer.chars().count() as u16, popup_area.y + 1));
         }
-    }
+        
+        if let AppMode::Search = self.mode{
+            let popup_area = bottom_right_rect(60,3,frame.area());
+            frame.render_widget(Clear, popup_area);
+
+            let search_box = Paragraph::new(self.search_buffer.clone()).block(
+                Block::default().title("Search Box")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                )
+                .style(Style::default().fg(Color::White));
+        
+
+        frame.render_widget(search_box, popup_area);
+
+        #[allow(clippy::cast_possible_truncation)]
+        frame.set_cursor_position((popup_area.x + 1 + self.create_buffer.chars().count() as u16, popup_area.y + 1));
+    }    
+}
     // === EVENT LOOP ===
         pub fn run(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
@@ -445,6 +480,10 @@ impl App {
                             if self.get_selected_name().is_some() {
                                 self.mode = AppMode::ConfirmDelete;
                             }
+                        },
+                        KeyCode::Char('/') => {
+                            self.mode = AppMode::Search;
+                            self.search_buffer.clear();
                         },
                         KeyCode::Char('-') => {
                             self.show_hidden = if self.show_hidden { false } else { true };
@@ -513,20 +552,39 @@ impl App {
                                 if let Some(pos) = self.items.iter().position(|i| i.name == search_name) {
                                     self.cursor_position = pos;
                                 }    
-                            } // FIXED: Added missing closing brace for the `if` statement
+                            }
                         },
                         _ => {}
                     },
+
+                    AppMode::Search => match key.code {
+                            KeyCode::Char(c) => {
+                                self.search_buffer.push(c);
+                                self.populate_files(); 
+                            },
+                            KeyCode::Backspace => {
+                                self.search_buffer.pop();
+                                self.populate_files();
+                            },
+                            KeyCode::Enter => {
+                                self.mode = AppMode::Normal;
+                            },
+                            KeyCode::Esc => {
+                                self.search_buffer.clear();
+                                self.mode = AppMode::Normal;
+                                self.populate_files();
+                            },
+                            _ => {}
+                        },
+                    }
                 }
             }
-        }
+        
         execute!(stdout(), LeaveAlternateScreen)?;
         disable_raw_mode()?;
-
         Ok(())
-        }
+    }
 }
-
 
 // === UTILITIES ===
 fn centered_rect(percent_x: u16, fixed_y: u16, r: Rect) -> Rect {
@@ -553,6 +611,89 @@ fn centered_rect(percent_x: u16, fixed_y: u16, r: Rect) -> Rect {
     horizontal_split[1]
 }
 
+fn bottom_right_rect(fixed_x: u16, fixed_y: u16, r: Rect) -> Rect {
+    // 1. Slice vertically to grab the bottom portion
+    let vertical_split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),          // The rest of the screen above
+            Constraint::Length(fixed_y), // The exact height at the bottom
+        ])
+        .split(r);
+
+    // 2. Slice horizontally to grab the right portion of that bottom slice
+    let horizontal_split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),          // The rest of the screen to the left
+            Constraint::Length(fixed_x), // The exact width at the right edge
+        ])
+        .split(vertical_split[1]);
+
+    // Return the bottom-right chunk
+    horizontal_split[1]
+}
+
+pub fn top_right_rect(fixed_x: u16, fixed_y: u16, r: Rect) -> Rect {
+    // 1. Slice vertically to grab the top portion
+    let vertical_split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(fixed_y), // The exact height at the top
+            Constraint::Min(0),          // The rest of the screen below
+        ])
+        .split(r);
+
+    // 2. Slice horizontally to grab the right portion of that top slice
+    let horizontal_split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),          // The rest of the screen to the left
+            Constraint::Length(fixed_x), // The exact width at the right edge
+        ])
+        .split(vertical_split[0]);
+
+    // Return the top-right chunk
+    horizontal_split[1]
+}
+
+fn populate_search_results(current_path: &PathBuf, search_buffer: &str, show_hidden: bool, items: &mut Vec<DirItem>) {
+    let mut dirs_to_visit = vec![current_path.clone()];
+        let search_term = search_buffer.to_lowercase();
+
+        while let Some(current_dir) = dirs_to_visit.pop() {
+            if let Ok(entries) = fs::read_dir(&current_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let file_name = entry.file_name().to_string_lossy().into_owned();
+                    
+                    if !show_hidden && file_name.starts_with('.') {
+                        continue;
+                    }
+
+                    if path.is_dir() {
+                        dirs_to_visit.push(path.clone());
+                    }
+
+                    if file_name.to_lowercase().contains(&search_term) {
+                        let display_name = path.strip_prefix(&current_path)
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or(file_name);
+
+                        let is_dir = path.is_dir();
+                        let (file_size, modified) = if let Ok(metadata) = entry.metadata() {
+                            (metadata.len(), metadata.modified().ok())
+                        } else {
+                            (0, None)
+                        };
+
+                        items.push(DirItem { name: display_name, is_dir, file_size, modified });
+                    }
+                }
+            }
+        }
+    }
+
 fn is_text_file(path: &std::path::Path) -> bool {
     if let Ok(mut file) = std::fs::File::open(path) {
     let mut buffer = [0u8; 512];
@@ -562,7 +703,7 @@ fn is_text_file(path: &std::path::Path) -> bool {
                 return true;
             }
             
-            return !buffer.iter().take(bytes_read).any(|&byte| byte == 0);        }
+            return !buffer.iter().take(bytes_read).any(|&byte| byte == 0);}
     }
     false
 }
