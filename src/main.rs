@@ -6,10 +6,10 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::self,
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph}
+    text,
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
-    use std::{
+use std::{
     env, fs,
     io::{self, stdout, Read},
     path::PathBuf,
@@ -17,10 +17,20 @@ use ratatui::{
 };
 use chrono::{DateTime};
 
+use ratatui_image::{
+    picker::Picker, 
+};
 
 pub struct KeyBinding {
     pub key : &'static str,
     pub description : &'static str,
+}
+
+pub enum PreviewData {
+    Text(String),
+    Image(ratatui_image::protocol::StatefulProtocol),
+    Unsupported,
+    None
 }
 
 const HELP_ITEMS: &[KeyBinding; 13] = &[
@@ -111,13 +121,16 @@ pub struct App {
     pub notification: Option<String>,
     pub sort_method: SortMethod,
     pub reverse: bool,
-    pub preview: Option<String>,
+    pub preview: PreviewData,
+    pub picker: Picker,
+
 }
 
 impl App {
     // === INITIALIZATION ===
     pub fn new() -> Self {
         let starting_path = env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
 
         Self {
             mode: AppMode::Normal,
@@ -134,7 +147,8 @@ impl App {
             notification: None,
             sort_method: SortMethod::Name,
             reverse: false,
-            preview: None,
+            preview: PreviewData::None,
+            picker,
         }
     }
 
@@ -295,20 +309,38 @@ impl App {
         });
     }
 
-    pub fn render_preview(&self, frame: &mut Frame, area:Rect) {
-        let preview_content = self.preview.as_deref().unwrap_or("");
-        
-        let preview_box = Paragraph::new(preview_content)
-            .block(
-                Block::default()
-                    .title(" Preview ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
-            )
-            // Using the full path here just in case Wrap isn't in your top imports
-            .wrap(ratatui::widgets::Wrap { trim: false });
+    pub fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .title("File Contents")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
 
-        frame.render_widget(preview_box, area);
+        match &mut self.preview { // <-- MATCH AS MUTABLE
+            PreviewData::Text(text) => {
+                let preview_box = Paragraph::new(text.as_str())
+                    .block(block)
+                    .wrap(ratatui::widgets::Wrap { trim: false });
+                frame.render_widget(preview_box, area);
+            }
+            PreviewData::Image(protocol) => {
+                let inner_area = block.inner(area);
+                frame.render_widget(block, area); 
+                
+                // FIXED: Render using the v11 Stateful widget
+                let image_widget = ratatui_image::StatefulImage::default();
+                frame.render_stateful_widget(image_widget, inner_area, protocol);
+            }            
+            PreviewData::Unsupported => {
+                let msg_box = Paragraph::new("-- Binary or Unsupported File --")
+                    .block(block)
+                    .alignment(Alignment::Center);
+                frame.render_widget(msg_box, area);
+            }
+            PreviewData::None => {
+                // Just render an empty bordered box for directories
+                frame.render_widget(block, area); 
+            }
+        }
     }
 
     pub fn cycle_sort(&mut self) {
@@ -347,7 +379,7 @@ impl App {
         let log_items: Vec<ListItem> = self.status_message
             .iter()
             .rev()
-            .take(9)
+            .take(40)
             .map(|msg| ListItem::new(
                     msg.as_str()))
             .collect();
@@ -366,21 +398,32 @@ impl App {
     pub fn fn_preview(&mut self) {
         if let Some(path) = self.get_selected_path() {
             if path.is_dir() {
-                self.preview = None;
+                self.preview = PreviewData::None;
+            } else if _is_image_file(&path) {
+                if let Ok(dyn_image) = image::open(&path) {
+                    // FIXED: Added the missing closing parenthesis
+                    let protocol = self.picker.new_resize_protocol(dyn_image);
+                    self.preview = PreviewData::Image(protocol);
+                } else {
+                    self.preview = PreviewData::Unsupported;
+                }
             } else if is_text_file(&path) {
                 if let Ok(mut file) = std::fs::File::open(&path) {
                     let mut buffer = vec![0u8; 2048];
                     if let Ok(bytes) = file.read(&mut buffer) {
-                        self.preview = Some(String::from_utf8_lossy(&buffer[0..bytes]).into_owned());}
+                        // FIXED: Replaced Some(...) with PreviewData::Text(...)
+                        self.preview = PreviewData::Text(
+                            String::from_utf8_lossy(&buffer[0..bytes]).into_owned()
+                        );
+                    }
                 }
             } else {
-                self.preview = Some(String::from("-- Binary or Non-Text File --"));
+                self.preview = PreviewData::Unsupported;
             }
         } else {
-            self.preview = None;
+            self.preview = PreviewData::None;
         }
     }
-    
 
     pub fn delete_item(&mut self) {
         if let Some(path) = self.get_selected_path() {
@@ -492,7 +535,7 @@ impl App {
 
 
     // === UI & RENDERING ===
-    pub fn ui(&self, frame: &mut Frame) {
+    pub fn ui(&mut self, frame: &mut Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -614,7 +657,7 @@ impl App {
         }
         
         if let AppMode::Search = self.mode{
-            let popup_area = bottom_right_rect(60,3,frame.area());
+            let popup_area = top_right_rect(60,3,frame.area());
             frame.render_widget(Clear, popup_area);
 
             let search_box = Paragraph::new(self.search_buffer.clone()).block(
@@ -647,6 +690,9 @@ impl App {
             terminal.draw(|f| self.ui(f))?;
 
             if let Event::Key(key) = event::read()? {
+                
+                self.notification = None;
+
                 match self.mode {
                     AppMode::Normal => match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => break,
@@ -781,29 +827,6 @@ fn centered_rect(percent_x: u16, fixed_y: u16, r: Rect) -> Rect {
     horizontal_split[1]
 }
 
-fn bottom_right_rect(fixed_x: u16, fixed_y: u16, r: Rect) -> Rect {
-    // 1. Slice vertically to grab the bottom portion
-    let vertical_split = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),          // The rest of the screen above
-            Constraint::Length(fixed_y), // The exact height at the bottom
-        ])
-        .split(r);
-
-    // 2. Slice horizontally to grab the right portion of that bottom slice
-    let horizontal_split = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0),          // The rest of the screen to the left
-            Constraint::Length(fixed_x), // The exact width at the right edge
-        ])
-        .split(vertical_split[1]);
-
-    // Return the bottom-right chunk
-    horizontal_split[1]
-}
-
 pub fn right_panel_rect(fixed_x: u16, r: Rect) -> Rect {
     let horizontal_split = Layout::default()
         .direction(Direction::Horizontal)
@@ -888,6 +911,11 @@ fn is_text_file(path: &std::path::Path) -> bool {
             return !buffer.iter().take(bytes_read).any(|&byte| byte == 0);}
     }
     false
+}
+
+fn _is_image_file(path: &std::path::Path) -> bool {
+    let ext = path.extension().unwrap_or_default().to_string_lossy().to_lowercase(); 
+    return matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp")
 }
 // === MAIN ===
 fn main() -> io::Result<()> {
