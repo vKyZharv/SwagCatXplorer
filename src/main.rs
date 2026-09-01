@@ -3,7 +3,10 @@ use crossterm::{
     event::{self, Event::self , KeyCode}, execute, terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
-    Frame, layout::{Alignment, Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style}, text::self, widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph}
+    Frame, layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style}, 
+    text::self, 
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph}
 };
     use std::{
     env, fs,
@@ -12,14 +15,15 @@ use ratatui::{
     time,
 };
 use open;
-use chrono::DateTime;
+use chrono::{DateTime};
+
 
 pub struct KeyBinding {
     pub key : &'static str,
-    pub description : &'static str, 
+    pub description : &'static str,
 }
 
-const HELP_ITEMS: &[KeyBinding; 11] = &[
+const HELP_ITEMS: &[KeyBinding; 12] = &[
     KeyBinding { key: "↑/↓", description: "Navigate" },
     KeyBinding { key: "Enter", description: "Open/Dir" },
     KeyBinding { key: "Backspace", description: "Back" },
@@ -31,6 +35,7 @@ const HELP_ITEMS: &[KeyBinding; 11] = &[
     KeyBinding { key: "-", description: "Hidden" },
     KeyBinding { key: "q", description: "Quit" },
     KeyBinding { key: "/", description: "Search"},
+    KeyBinding { key: "h", description: "History"},
 ];
 
 
@@ -80,6 +85,7 @@ pub enum AppMode {
     Renaming,
     Create,
     Search,
+    History,
 }
 
 // === APP STATE ===
@@ -94,6 +100,8 @@ pub struct App {
     pub show_hidden: bool,
     pub create_buffer: String,
     pub search_buffer:String,
+    pub status_message: Vec<String>,
+    pub notification: Option<String>,
 }
 
 impl App {
@@ -112,6 +120,8 @@ impl App {
             show_hidden: false,
             create_buffer: String::new(),
             search_buffer: String::new(),
+            status_message: Vec::new(),
+            notification: None,
         }
     }
 
@@ -252,13 +262,51 @@ impl App {
         Some(self.current_path.join(file_name))
     }
 
+    pub fn log_action(&mut self, msg: String) {
+        self.notification = Some(msg.clone());
+        self.status_message.push(msg);
+    }
+
     // === FILE OPERATIONS ===
+    
+    pub fn show_history(&self, frame: &mut Frame) {
+        if self.status_message.is_empty() {
+            return;
+        }
+
+        let popup_area = right_panel_rect(80,frame.area());
+        frame.render_widget(Clear,popup_area);
+
+        let log_items: Vec<ListItem> = self.status_message
+            .iter()
+            .rev()
+            .take(9)
+            .map(|msg| ListItem::new(
+                    msg.as_str()))
+            .collect();
+
+        let log_list = List::new(log_items)
+            .block(
+                Block::default()
+                .title("History")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue))
+                )
+            .style(Style::default().fg(Color::LightGreen));
+        frame.render_widget(log_list, popup_area);
+    }
+    
+    
+
     pub fn delete_item(&mut self) {
         if let Some(path) = self.get_selected_path() {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
             if path.is_file() {
                 let _ = std::fs::remove_file(&path);
+                self.log_action(format!("File {} deleted!", name));
             } else if path.is_dir() {
                 let _ = std::fs::remove_dir_all(&path);
+                self.log_action(format!("Folder {} deleted!", name));
             }
             self.populate_files();
 
@@ -270,23 +318,29 @@ impl App {
 
     pub fn copy_item(&mut self) {
         if let Some(full_path) = self.get_selected_path() {
+            let name = full_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
             self.clipboard = Some(full_path);
+
+            self.log_action(format!("Copied: {}", name));
         }
     }
 
     pub fn paste_item(&mut self) {
-        if let Some(source_path) = &self.clipboard {
+        if let Some(source_path) = &self.clipboard.clone() {
             if let Some(file_name) = source_path.file_name() {
                 let dest_path = self.current_path.join(file_name);
+                let name = file_name.to_string_lossy();
 
                 if source_path.is_file() {
-                    let _ = std::fs::copy(source_path, dest_path);
+                    let _ = std::fs::copy(source_path, &dest_path);
                     self.populate_files();
                 }
+
+            self.log_action(format!("Pasted: {} at {}",name, dest_path.display()));
             }
         }
     }
-        pub fn create(&mut self) {
+    pub fn create(&mut self) {
             if self.create_buffer.is_empty() {
                 self.mode = AppMode::Normal;
                 return;
@@ -294,10 +348,12 @@ impl App {
 
             let target_path = self.current_path.join(&self.create_buffer);
 
-            if self.rename_buffer.ends_with('/') {
+            if self.create_buffer.ends_with('/') {
                 let _ = std::fs::create_dir_all(&target_path);
+                self.log_action(format!("New folder {} created", &self.create_buffer));
             } else {
                 let _ = std::fs::File::create(&target_path);
+                self.log_action(format!("New file {} created", &self.create_buffer));
             }
 
             self.mode = AppMode::Normal;
@@ -315,12 +371,20 @@ impl App {
         if let Some(old_path) = self.get_selected_path() {
             if !self.rename_buffer.is_empty() {
                 let new_path = self.current_path.join(&self.rename_buffer);
+                let old_name = old_path.clone()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 let _ = std::fs::rename(old_path, new_path);
                 self.populate_files();
+
+                self.log_action(format!
+                    ("File/Folder renamed from {} -> {}", old_name, &self.rename_buffer));
             }
         }
         self.rename_buffer.clear();
-        self.mode = AppMode::Normal
+        self.mode = AppMode::Normal;
     }
 
     pub fn open_in_editor(&mut self) {
@@ -384,6 +448,27 @@ impl App {
         frame.render_stateful_widget(list, chunks[0], &mut list_state);
 
         self.render_footer(frame, chunks[1]);
+
+        if let Some(msg) = &self.notification {
+            let pop_up = top_right_rect(80, 3, frame.area());
+            frame.render_widget(Clear, pop_up);
+        
+
+            let status_box = Paragraph::new(msg.as_str())
+                .block(
+                    Block::default()
+                    .title("Status")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Green))
+                    )
+                .style(Style::default().fg(Color::Cyan));
+            frame.render_widget(status_box,pop_up);
+        }
+        
+        if let AppMode::History = self.mode {
+            self.show_history(frame);
+        }
+
 
         if let AppMode::ConfirmDelete = self.mode {
             let target_name = self.get_selected_name().unwrap_or_else(|| String::from("this item"));
@@ -501,6 +586,9 @@ impl App {
                             self.mode = AppMode::Create;
                             self.create_buffer.clear();
                         },
+                        KeyCode::Char('h') => {
+                            self.mode = AppMode::History;
+                        },
                         _ => {}
                     },
                     AppMode::ConfirmDelete => match key.code {
@@ -534,26 +622,14 @@ impl App {
                             self.create_buffer.pop();
                         },
                         KeyCode::Enter => {
-                            if !self.create_buffer.is_empty() {
-                                let target_path = self.current_path.join(&self.create_buffer);
-                                
-                                // The Magic: '/' means folder, anything else means file
-                                if self.create_buffer.ends_with('/') {
-                                    let _ = std::fs::create_dir_all(&target_path);
-                                } else {
-                                    let _ = std::fs::File::create(&target_path);
-                                }
+                            self.create();                        },
+                        _ => {}
+                    },
 
-                                self.mode = AppMode::Normal;
-                                self.populate_files();
-
-                                // Optional but awesome: automatically move the cursor to the new item!
-                                let search_name = self.create_buffer.trim_end_matches('/');
-                                if let Some(pos) = self.items.iter().position(|i| i.name == search_name) {
-                                    self.cursor_position = pos;
-                                }    
-                            }
-                        },
+                    AppMode::History => match key.code {
+                        KeyCode::Char('h') | KeyCode::Esc => {
+                            self.mode = AppMode::Normal;
+                        }
                         _ => {}
                     },
 
@@ -631,6 +707,18 @@ fn bottom_right_rect(fixed_x: u16, fixed_y: u16, r: Rect) -> Rect {
         .split(vertical_split[1]);
 
     // Return the bottom-right chunk
+    horizontal_split[1]
+}
+
+pub fn right_panel_rect(fixed_x: u16, r: Rect) -> Rect {
+    let horizontal_split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),          // The main file list takes the rest
+            Constraint::Length(fixed_x), // The exact width of the action log
+        ])
+        .split(r);
+
     horizontal_split[1]
 }
 
