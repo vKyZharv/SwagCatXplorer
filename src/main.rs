@@ -1,6 +1,4 @@
 // === IMPORTS ===
-use std::cmp::Ordering;
-
 use crossterm::{
     event::{self, Event::self , KeyCode}, execute, terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -34,7 +32,7 @@ const HELP_ITEMS: &[KeyBinding; 13] = &[
     KeyBinding { key: "d", description: "Delete" },
     KeyBinding { key: "c", description: "Copy" },
     KeyBinding { key: "v", description: "Paste" },
-    KeyBinding { key: "-", description: "Hidden" },
+    KeyBinding { key: "]", description: "Hidden" },
     KeyBinding { key: "q", description: "Quit" },
     KeyBinding { key: "/", description: "Search"},
     KeyBinding { key: "h", description: "History"},
@@ -80,7 +78,7 @@ impl DirItem {
         }
     }
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum SortMethod {
     Name,
     Size,
@@ -276,20 +274,19 @@ impl App {
     }
     
     pub fn sort_files(&mut self){
-        self.items.sort_by(|a,b| {
-        if a.is_dir && b.is_dir { return Ordering::Less;}
-        if !a.is_dir && b.is_dir {return Ordering::Greater;}
 
-        let mut ordering = match self.sort_method {
+        let method = self.sort_method.clone();
+
+        self.items.sort_by(|a,b| {
+            b.is_dir.cmp(&a.is_dir).then_with(|| match method {
+
             SortMethod::Name => a.name.to_lowercase()
                 .cmp(&b.name.to_lowercase()),
             SortMethod::Size => a.file_size.cmp(&b.file_size),
             SortMethod::DateModified => a.modified.cmp(&b.modified),
-        };
-        if self.reverse {
-            ordering = ordering.reverse();
-        }
-        ordering
+        }).then_with(|| a.name.to_lowercase()
+        .cmp(&b.name.to_lowercase()))
+        
         });
     }
 
@@ -620,7 +617,7 @@ impl App {
                             self.mode = AppMode::Search;
                             self.search_buffer.clear();
                         },
-                        KeyCode::Char('-') => {
+                        KeyCode::Char(']') => {
                             self.show_hidden = if self.show_hidden { false } else { true };
                             self.populate_files();
                         },
