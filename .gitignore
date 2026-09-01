@@ -1,1 +1,7 @@
-/target
+/target/debug
+/target/flycheck0
+/target/CACHEDIR.TAG 
+/target/release/build
+/target/release/deps
+/target/release/examples
+/target/release/incremental
