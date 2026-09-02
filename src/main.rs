@@ -1,6 +1,8 @@
 // === IMPORTS ===
 use crossterm::{
-    event::{self, Event::self , KeyCode}, execute, terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    event::{self, Event::self , KeyCode},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     Frame,
@@ -18,7 +20,7 @@ use std::{
 use chrono::{DateTime};
 
 use ratatui_image::{
-    picker::Picker, 
+    picker::Picker, protocol::{self, StatefulProtocol}, 
 };
 
 pub struct KeyBinding {
@@ -28,9 +30,11 @@ pub struct KeyBinding {
 
 pub enum PreviewData {
     Text(String),
-    Image(ratatui_image::protocol::StatefulProtocol),
+    Image(protocol::StatefulProtocol),
+    Mascot(protocol::StatefulProtocol),
     Unsupported,
-    None
+    Loading,
+    None,
 }
 
 const HELP_ITEMS: &[KeyBinding; 13] = &[
@@ -103,6 +107,7 @@ pub enum AppMode {
     Create,
     Search,
     History,
+    Splash,
 }
 
 // === APP STATE ===
@@ -123,6 +128,7 @@ pub struct App {
     pub reverse: bool,
     pub preview: PreviewData,
     pub picker: Picker,
+    pub splash_protocol: Option<StatefulProtocol>,
 
 }
 
@@ -131,6 +137,11 @@ impl App {
     pub fn new() -> Self {
         let starting_path = env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+
+        let swag_bytes = include_bytes!("swagcat.png");
+        let splash_protocol = image::load_from_memory(swag_bytes)
+            .ok()
+            .map(|dyn_image| picker.new_resize_protocol(dyn_image));
 
         Self {
             mode: AppMode::Normal,
@@ -149,6 +160,7 @@ impl App {
             reverse: false,
             preview: PreviewData::None,
             picker,
+            splash_protocol
         }
     }
 
@@ -316,6 +328,14 @@ impl App {
             .border_style(Style::default().fg(Color::Cyan));
 
         match &mut self.preview { // <-- MATCH AS MUTABLE
+            PreviewData::Loading => {
+                let msg_box = Paragraph::new("Loading Image....")
+                    .block(block)
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(Color::Yellow));
+                frame.render_widget(msg_box, area);
+            }
+                                  
             PreviewData::Text(text) => {
                 let preview_box = Paragraph::new(text.as_str())
                     .block(block)
@@ -339,6 +359,14 @@ impl App {
             PreviewData::None => {
                 // Just render an empty bordered box for directories
                 frame.render_widget(block, area); 
+            }
+            PreviewData::Mascot(protocol) => {
+                let inner_area = block.inner(area);
+                frame.render_widget(Block::default().title("Nothing to see here!").borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)), area);
+                
+                let centered = centered_fixed_rect(40,20, inner_area);
+                let image_widget = ratatui_image::StatefulImage::default();
+                frame.render_stateful_widget(image_widget, centered, protocol);
             }
         }
     }
@@ -396,6 +424,18 @@ impl App {
     }
     
     pub fn fn_preview(&mut self) {
+        if self.items.is_empty() {
+            let swag_bytes = include_bytes!("swagcat.png");
+            if let Ok(dyn_image) = image::load_from_memory(swag_bytes) {
+                let proto = self.picker.new_resize_protocol(dyn_image);
+                self.preview = PreviewData::Mascot(proto);
+            } else {
+                self.preview = PreviewData::None;
+            }
+            return;
+        }
+
+
         if let Some(path) = self.get_selected_path() {
             if path.is_dir() {
                 self.preview = PreviewData::None;
@@ -536,6 +576,45 @@ impl App {
 
     // === UI & RENDERING ===
     pub fn ui(&mut self, frame: &mut Frame) {
+
+        if self.mode == AppMode::Splash {
+            // Increased height to 22 to comfortably fit the image + text + borders
+            let popup_area = centered_fixed_rect(50, 10, frame.area()); 
+            frame.render_widget(Clear, popup_area);
+
+            // A clean block with no title
+            let splash_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta));
+
+            let inner_area = splash_block.inner(popup_area);
+            frame.render_widget(splash_block, popup_area);
+
+            // Split the inside: top for the image, bottom 2 lines for the text
+            let splash_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(0),    // Image takes remaining space
+                    Constraint::Length(2), // Text gets bottom 2 lines
+                ])
+                .split(inner_area);
+
+            // Render the cat in the top chunk
+            if let Some(protocol) = &mut self.splash_protocol {
+                let image_widget = ratatui_image::StatefulImage::default();
+                frame.render_stateful_widget(image_widget, splash_chunks[0], protocol);
+            }
+
+            // Render the text in the bottom chunk
+            let splash_text = Paragraph::new("SwagCatXplorer — Press any key to enter")
+                .alignment(Alignment::Left)
+                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            
+            frame.render_widget(splash_text, splash_chunks[1]);
+
+            return;
+        }
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -741,6 +820,12 @@ impl App {
                         }
                         _ => {}
                     },
+
+                    AppMode::Splash => {
+                        self.mode = AppMode::Normal;
+                        self.splash_protocol = None;
+                        self.should_force_redraw = true;
+                    },
                     AppMode::Renaming => match key.code {
                         KeyCode::Char(c) => self.rename_buffer.push(c),
                         KeyCode::Backspace => { self.rename_buffer.pop(); },
@@ -912,6 +997,30 @@ fn is_text_file(path: &std::path::Path) -> bool {
     }
     false
 }
+
+fn centered_fixed_rect(fixed_x: u16, fixed_y: u16, r: Rect) -> Rect {
+    let vertical_split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(fixed_y),
+            Constraint::Min(0),
+        ])
+        .split(r);
+
+    let horizontal_split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(fixed_x),
+            Constraint::Min(0),
+        ])
+        .split(vertical_split[1]);
+
+    horizontal_split[1]
+}
+
+
 
 fn _is_image_file(path: &std::path::Path) -> bool {
     let ext = path.extension().unwrap_or_default().to_string_lossy().to_lowercase(); 
